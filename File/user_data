@@ -1,0 +1,301 @@
+#cloud-config
+write_files:
+  - path: /opt/bin/get-certs.sh
+    owner: root
+    permissions: 0755
+    content: |
+      #!/bin/bash
+      sudo mkdir -p /etc/kubernetes/ssl/
+      path=$(dirname $0)
+      if etcdctl --no-sync  get /kube-apiserver-pem >/dev/null 2>&1; then  
+      if [ ! -f "/etc/kubernetes/ssl/ca.pem" ]; then  
+      mkdir -p /etc/kubernetes/ssl/;
+      etcdctl --no-sync  get /pem/kube-apiserver-pem > /etc/kubernetes/ssl/apiserver.pem;  
+      etcdctl --no-sync  get /pem/kube-apiserver-key-pem > /etc/kubernetes/ssl/apiserver-key.pem; 
+      etcdctl --no-sync  get /pem/kube-worker-pem > /etc/kubernetes/ssl/worker.pem;
+      etcdctl --no-sync  get /pem/kube-worker-key-pem > /etc/kubernetes/ssl/worker-key.pem;
+      etcdctl --no-sync  get /pem/kube-admin-pem > /etc/kubernetes/ssl/admin.pem;
+      etcdctl --no-sync  get /pem/kube-admin-key-pem > /etc/kubernetes/ssl/admin-key.pem;
+      etcdctl --no-sync  get /pem/kube-ca-pem > /etc/kubernetes/ssl/ca.pem; 
+      fi 
+      else 
+      mkdir -p /etc/kubernetes/ssl;
+      $path/init-ssl-ca /etc/kubernetes/ssl ; 
+      $path/init-ssl /etc/kubernetes/ssl apiserver apiserver-worker IP.1=127.0.0.1,IP.2=$1; 
+      $path/init-ssl /etc/kubernetes/ssl worker kube-worker;
+      $path/init-ssl /etc/kubernetes/ssl admin kube-admin;
+      etcdctl --no-sync   set /pem/kube-apiserver-pem < /etc/kubernetes/ssl/apiserver.pem;
+      etcdctl --no-sync  set /pem/kube-apiserver-key-pem < /etc/kubernetes/ssl/apiserver-key.pem;
+      etcdctl --no-sync   set /pem/kube-worker-pem < /etc/kubernetes/ssl/worker.pem;
+      etcdctl --no-sync  set /pem/kube-worker-key-pem < /etc/kubernetes/ssl/worker-key.pem;
+      etcdctl --no-sync   set /pem//kube-admin-pem < /etc/kubernetes/ssl/admin.pem;
+      etcdctl --no-sync  set /pem/kube-admin-key-pem < /etc/kubernetes/ssl/admin-key.pem;
+      etcdctl --no-sync  set /pem/kube-ca-pem < /etc/kubernetes/ssl/ca.pem;
+      fi
+      # Set permissions.
+      sudo chmod 600 /etc/kubernetes/ssl/*-key.pem
+      sudo chown root:root /etc/kubernetes/ssl/*-key.pem
+      cp -i /etc/kubernetes/ssl/ca.pem /etc/ssl/certs/ca.pem
+      update-ca-certificates   
+  - path: /etc/other-environment
+    owner: root
+    permissions: 0755
+    content: |
+      # Location from which to download the Kubernetes binaries
+      KUBERNETES_VESSION=v1.6.2
+      KUBERNETES_LOC=https://storage.googleapis.com/kubernetes-release/release/v1.6.2/bin/linux/amd64/
+      # The kubernetes master IP
+      KUBERNETES_MASTER=<KUBERNETES_MASTER>
+      # Location of etcd cluster used by Calico.
+      ETCD_AUTHORITY=<KUBERNETES_MASTER>:4001
+      # The kubernetes-apiserver location - used by the calico plugin
+      KUBE_API_ROOT=http://<KUBERNETES_MASTER>:8080/api/v1/
+      # Location of the calicoctl binary - used by the calico plugin
+      CALICOCTL_PATH=/opt/core/calicoctl
+  - path: /opt/core/kubernetes-download.sh
+    owner: root
+    permissions: 0755
+    content: |
+      #! /usr/bin/bash
+      # Network not always up, ping to wait for internet connection
+      while ! ping -c 1 $KUBERNETES_LOC; do :; done
+      # Download kubernetes binaries
+      /usr/bin/wget -N -P "/opt/core" "http://$KUBERNETES_LOC/kubectl"
+      /usr/bin/wget -N -P "/opt/core" "http://$KUBERNETES_LOC/kubernetes"
+      /usr/bin/wget -N -P "/opt/core" "http://$KUBERNETES_LOC/kube-controller-manager"
+      /usr/bin/wget -N -P "/opt/core" "http://$KUBERNETES_LOC/kube-apiserver"
+      /usr/bin/wget -N -P "/opt/core" "http://$KUBERNETES_LOC/kube-scheduler"
+      /usr/bin/wget -N -P "/opt/core" "http://$KUBERNETES_LOC/kube-proxy"
+      /usr/bin/wget -N -P "/opt/core" "http://$KUBERNETES_LOC/kubelet"
+      sudo chmod +x /opt/core/*
+  - path: /opt/core/calico-node.sh
+    owner: root
+    permissions: 0755
+    content: |
+      #! /usr/bin/bash
+      # Usage: calico-node.sh <node ip> <etcd authority>
+
+      # Install necessary kernel modules
+      sudo modprobe xt_set
+      sudo modprobe ip6_tables
+      sudo /opt/core/calicoctl checksystem --fix
+
+      # Create a /tmp directory for docker plugins.  We don't actually use docker plugins,
+      # but the default docker directory is in /usr, which fails on CoreOS.
+      TEMP_PLUGIN_DIR=`mktemp`
+      echo "Using tmp plugin dir ${TEMP_PLUGIN_DIR}"
+
+      # Start the Calico node. TODO: Use the --kubernetes flag when starting Calico node.
+      #sudo /usr/bin/mkdir -p /etc/kubelet-plugins/calico
+      #sudo /usr/bin/wget -N -P "/etc/kubelet-plugins/calico" "https://github.com/projectcalico/calicoctl/releases/download/v0.5.1/calico_kubernetes"
+      #sudo mv /etc/kubelet-plugins/calico/calico_kubernetes /etc/kubelet-plugins/calico/calico
+      #sudo /usr/bin/chmod +x /etc/kubelet-plugins/calico/calico
+      #sudo ETCD_AUTHORITY=$2 /opt/core/calicoctl node --ip=$1 --plugin-dir=$TEMP_PLUGIN_DIR
+
+coreos:
+  units:
+    - name: etcd2.service
+      command: start
+      content: |
+        [Unit]
+        Description=etcd2
+        Conflicts=etcd.service
+        Requires=setup-network-environment.service
+        After=setup-network-environment.service
+        [Service]
+        User=etcd
+        Type=notify
+        EnvironmentFile=/etc/environment
+        EnvironmentFile=/opt/config/discorver.env
+        Environment="ETCD_ELECTION_TIMEOUT=2000"
+        Environment="ETCD_HEARTBEAT_INTERVAL=400"
+        Environment=ETCD_DATA_DIR=/var/lib/etcd2
+        Environment=ETCD_NAME=%H
+        ExecStart=/usr/bin/etcd2 --advertise-client-urls http://${DEFAULT_IPV4}:2379,http://${DEFAULT_IPV4}:4001   --listen-client-urls http://0.0.0.0:2379,http://0.0.0.0:4001   --initial-advertise-peer-urls http://${DEFAULT_IPV4}:2380,http://${DEFAULT_IPV4}:7001   --listen-peer-urls http://0.0.0.0:2380,http://0.0.0.0:7001 --discovery $DISCOVER
+        Restart=always
+        RestartSec=10s
+        LimitNOFILE=40000
+        TimeoutStartSec=0
+        [Install]
+        WantedBy=multi-user.target
+    - name: fleet.service
+      command: start
+      drop-ins:
+        - name: 30-ListenStream.conf
+          content: |
+            [Socket]
+            ListenStream=0.0.0.0:49153
+    - name: flanneld.service
+      command: start 
+      drop-ins:
+        - name: 50-network-config.conf
+          content: |
+            [Service]
+            ExecStartPre=/usr/bin/etcdctl set /coreos.com/network/config '{ "Network": "10.2.0.0/16" }'
+        - name: 40-ExecStartPre-symlink.conf
+          content: |
+            [Service]
+            ExecStartPre=/usr/bin/ln -sf /etc/flannel/options.env /run/flannel/options.env
+    - name: setup-network-environment.service
+      command: start
+      content: |
+        [Unit]
+        Description=Setup Network Environment
+        Documentation=https://github.com/kelseyhightower/setup-network-environment
+        Requires=network-online.target
+        After=network-online.target
+        [Service]
+        ExecStart=/opt/bin/setup-network-environment -o /etc/environment
+        RemainAfterExit=yes
+        Type=oneshot
+    - name: docker.service
+      command: start
+      drop-ins:
+        - name: 40-flannel.conf
+          content: |
+             [Unit]
+             Requires=flanneld.service
+             After=flanneld.service
+      content: |
+        [Unit]
+        Description=Docker Application Container Engine
+        Documentation=http://docs.docker.com
+        After=docker.socket early-docker.target network.target
+        Requires=docker.socket early-docker.target
+        [Service]
+        Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin:/opt/bin/"
+        Environment="DOCKER_CGROUPS=--exec-opt native.cgroupdriver=systemd"
+        EnvironmentFile=-/run/flannel_docker_opts.env
+        MountFlags=shared
+        LimitNOFILE=1048576
+        LimitNPROC=1048576
+        ExecStart=/opt/bin/docker  daemon --host=fd:// $DOCKER_OPTS $DOCKER_CGROUPS $DOCKER_OPT_BIP $DOCKER_OPT_MTU $DOCKER_OPT_IPMASQ -H 0.0.0.0:2375 -H unix:///var/run/docker.sock
+        [Install]
+        WantedBy=multi-user.target
+    - name: get-certs.service
+      runtime: true
+      command: start
+      content: |
+        [Unit]
+        Description=Install certificates
+        Requires=etcd2.service get-certs.service kubernetes-env.service
+        After=etcd2.service kubernetes-env.service
+        [Service]
+        EnvironmentFile=/etc/kubernetes.env
+        ExecStartPre=/usr/bin/wget -N -P /opt/bin https://raw.githubusercontent.com/coreos/coreos-kubernetes/master/lib/init-ssl
+        ExecStartPre=/usr/bin/chmod +x /opt/bin/init-ssl
+        ExecStartPre=/usr/bin/wget -N -P /opt/bin https://raw.githubusercontent.com/coreos/coreos-kubernetes/master/lib/init-ssl-ca
+        ExecStartPre=/usr/bin/chmod +x /opt/bin/init-ssl-ca
+        ExecStart=/opt/bin/get-certs.sh ${K8S_SERVICE_IP}
+        RemainAfterExit=yes
+        Type=oneshot
+    - name: fleet-hosts.service
+      command: start
+      content: |
+        [Unit]
+        Description=Adds IP->host entries for every node in fleet cluster 
+
+        [Service]
+        StandardOutput=journal
+        StandardError=journal
+        Type=oneshot
+        EnvironmentFile=/etc/environment
+        ExecStartPre=-/usr/bin/bash -c "/usr/bin/systemctl set-environment COREOS_HOST=$(/usr/bin/hostname)"
+        # mkdir has a bug where it should not print error if exists, but does
+        ExecStartPre=-/usr/bin/etcdctl mkdir /fleet-hosts 2>/dev/null
+        ExecStart=/usr/bin/etcdctl set /fleet-hosts/host-${DEFAULT_IPV4} $COREOS_HOST
+
+        [X-Fleet]
+        Global=true
+    - name: kubernetes-env.service
+      command: start
+      content: |
+        [Unit]
+        Description=Sets up Kubernetes environment variables
+        After=early-docker.target docker.service network-online.target
+        Before=docker.target kubernetes-apiserver.service
+
+        [Service]
+        StandardOutput=journal
+        StandardError=journal
+        Type=oneshot
+        EnvironmentFile=/etc/environment
+        Environment=HYPERKUBE_IMG=117.25.155.104:5000/coreos/hyperkube
+        Environment=HYPERKUBE_VER=v1.6.2
+        Environment=K8S_VER=v1.6.2
+        Environment=KUBERNETES_CERT_DIR=/etc/certs/kubernetes
+        Environment=KUBERNETES_LOG_DIR=/var/log/kubernetes
+        Environment=CLUSTER_IP_RANGE=10.3.0.0/16
+        Environment=KUBERNETES_DNS=10.3.0.100
+        Environment=K8S_SERVICE_IP=10.3.0.1
+        Environment=CONTROLLER_ENDPOINT=127.0.0.1
+        Environment=KUBERNETES_DOMAIN=kubernetes.local
+        Environment=KUBERNETES_MANIFEST_DIR=/etc/kubernetes/manifests
+        Environment=KUBERNETES_API_SCHEME=http
+        Environment=CNIPLUGIN_VER=v1.8.0
+        Environment=CALICOCTL_VER=v1.1.3
+        Environment=KUBERNETES_API_PORT=8080
+        Environment=DOCKER_SOCK=/var/run/docker.sock
+        Environment=CONTAINER_RUNTIME=docker
+        ExecStartPre=-/usr/bin/bash -c "/usr/bin/systemctl set-environment HOSTS_LINE='${DEFAULT_IPV4} $(hostname)'"
+        # set up the /etc/hosts file with all of the system hosts
+        ExecStart=/usr/bin/sh -c "for h in $(fleetctl list-machines|awk '{ print $2 }' | tail -n+2); do grep -q $h $(etcdctl get /fleet-hosts/host-$h) /etc/hosts || echo $h $(etcdctl get /fleet-hosts/host-$h) >> /etc/hosts; done"
+
+        # fleetctl list-machines|awk '{ print $2 }' | tail -n+2
+        ExecStart=/usr/bin/sh -c "grep -q ${HOSTS_LINE} /etc/hosts || echo ${HOSTS_LINE} >> /etc/hosts"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo HYPERKUBE_IMG=${HYPERKUBE_IMG} > /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo HYPERKUBE_VER=${HYPERKUBE_VER} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo KUBERNETES_CERT_DIR=${KUBERNETES_CERT_DIR} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo KUBERNETES_MANIFEST_DIR=${KUBERNETES_MANIFEST_DIR} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo KUBERNETES_LOG_DIR=${KUBERNETES_LOG_DIR} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo KUBERNETES_API_SCHEME=${KUBERNETES_API_SCHEME} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo CLUSTER_IP_RANGE=${CLUSTER_IP_RANGE} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo DEFAULT_IPV4=${DEFAULT_IPV4} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo KUBERNETES_API_PORT=${KUBERNETES_API_PORT} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo KUBERNETES_DNS=${KUBERNETES_DNS} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo K8S_SERVICE_IP=${K8S_SERVICE_IP} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo CONTROLLER_ENDPOINT=${CONTROLLER_ENDPOINT} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo KUBERNETES_DOMAIN=${KUBERNETES_DOMAIN} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo DOCKER_SOCK=${DOCKER_SOCK} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo CONTAINER_RUNTIME=${CONTAINER_RUNTIME} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo K8SRELEASE=https://storage.googleapis.com/kubernetes-release/release/$K8S_VER/bin/linux/amd64 >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo CALICORELEASE=https://github.com/projectcalico/cni-plugin/releases/download/${CNIPLUGIN_VER} >> /etc/kubernetes.env"
+        ExecStart=/usr/bin/sh -c "/usr/bin/echo CALICOCTLRELEASE=https://github.com/projectcalico/calicoctl/releases/download/${CALICOCTL_VER} >> /etc/kubernetes.env"
+
+        [Install]
+        WantedBy=multi-user.target
+
+        [X-Fleet]
+        Global=true
+    - name: provision-worker.service
+      runtime: true
+      command: stop
+      content: |
+        [Unit]
+        Description=Install certificates
+        Requires=etcd2.service get-certs.service kubernetes-env.service
+        After=etcd2.service get-certs.service  kubernetes-env.service
+        [Service]
+        EnvironmentFile=/etc/kubernetes.env
+        ExecStart=/opt/bin/provision-worker.sh ${K8S_SERVICE_IP} ${CONTROLLER_ENDPOINT}
+        RemainAfterExit=yes
+        Type=oneshot
+    - name: provision-node.service
+      runtime: true
+      command: start
+      content: |
+        [Unit]
+        Description=Install certificates
+        Requires=etcd2.service get-certs.service kubernetes-env.service
+        After=etcd2.service get-certs.service  kubernetes-env.service
+        [Service]
+        EnvironmentFile=/etc/kubernetes.env
+        ExecStartPre=/opt/bin/loadimages.sh
+        ExecStart=/opt/bin/provision-node.sh ${K8S_SERVICE_IP} ${CONTROLLER_ENDPOINT}
+        RemainAfterExit=yes
+        Type=oneshot
+
+
+users:
+  - name: core
+    passwd: $1$AecnBM.A$k5lMFTl8BdLcHJMmK6Mz31

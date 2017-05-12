@@ -1,0 +1,25 @@
+#cloud-config
+coreos:
+  units:
+    - name: etcd2.service
+      command: start
+    - name: etcd.service
+      mask: true
+    - name: fleet.service
+      command: start
+    - name: static.network
+      content: |
+        [Match]
+        Name=eno1
+
+        [Network]
+        Address=117.25.155.104/27
+        Address=10.1.1.1/24
+        Gateway=117.25.155.97
+        DNS=180.76.76.76
+users:
+  - name: core
+    passwd: $1$AecnBM.A$k5lMFTl8BdLcHJMmK6Mz31
+  - groups:
+      - sudo
+      - docker
